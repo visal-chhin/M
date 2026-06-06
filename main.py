@@ -32,8 +32,6 @@ DEFAULT_HEADERS = {
 }
 
 POST_ID_REGEX = re.compile(r"postid-(\d+)")
-
-# Regex to safely parse and increment/decrement trailing URL episode signatures (e.g., "1x3")
 EPISODE_URL_REGEX = re.compile(r"(\d+)x(\d+)(/?)$")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -57,7 +55,7 @@ class Stats:
                 s.total_requests = data.get("total_requests", 0)
                 s.users = data.get("users", {})
         except Exception as e:
-            logging.error(f"Failed to load user stats: {e}")
+            logging.error(f"Failed to load stats: {e}")
         return s
 
     def save(self) -> None:
@@ -67,7 +65,7 @@ class Stats:
                 with open(STATS_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4)
             except Exception as e:
-                logging.error(f"Failed to write user stats: {e}")
+                logging.error(f"Failed to write stats: {e}")
 
     def track_user(self, chat_id: int, username: str) -> None:
         with self._lock:
@@ -92,8 +90,8 @@ class Stats:
             entries = [(u.get("username", "unknown"), u.get("request_count", 0)) for u in self.users.values()]
             entries.sort(key=lambda x: x[1], reverse=True)
             top = entries[:5]
-            lines = [f"{i}. @{username} — {count} requests" for i, (username, count) in enumerate(top, start=1)]
-            return f"📊 System Stats:\n\nTotal Users: {len(self.users)}\nTotal Requests: {self.total_requests}\n\nTop 5 Users:\n" + "\n".join(lines)
+            lines = [f"{i}. @{username} — {count} reqs" for i, (username, count) in enumerate(top, start=1)]
+            return f"📊 Stats:\nTotal Users: {len(self.users)}\nTotal Reqs: {self.total_requests}\n\nTop 5:\n" + "\n".join(lines)
 
 
 class PendingMap:
@@ -102,7 +100,6 @@ class PendingMap:
         self._data: Dict[int, dict] = {}
 
     def set(self, chat_id: int, url_str: str) -> None:
-        # Determine initial episode counter from URL if explicitly present
         initial_ep = 1
         match = EPISODE_URL_REGEX.search(url_str.rstrip("/"))
         if match:
@@ -141,7 +138,7 @@ def get_khdiamond_stream(page_url: str, media_type: str, episode: int = 1, proxy
 
     match = POST_ID_REGEX.search(html)
     if not match:
-        raise Exception("Post ID mapping target missing on current page.")
+        raise Exception("Post ID missing on page.")
     post_id = match.group(1)
 
     payload = {
@@ -162,7 +159,7 @@ def get_khdiamond_stream(page_url: str, media_type: str, episode: int = 1, proxy
     result = response.json()
     embed_url = result.get("embed_url")
     if not embed_url:
-        raise Exception("Target stream embed link empty for this element configuration.")
+        raise Exception("Empty embed stream response.")
         
     return embed_url
 
@@ -172,7 +169,7 @@ stats_manager = Stats.load()
 pending_sessions = PendingMap()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("👋 Send me a valid khdiamond.net link to capture streaming targets.")
+    await update.message.reply_text("👋 Send a khdiamond.net link.")
 
 async def count_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(stats_manager.report())
@@ -188,18 +185,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not text.startswith("http") or "khdiamond.net" not in text:
-        await update.message.reply_text("⚠️ Please enter a valid khdiamond.net link.")
+        await update.message.reply_text("⚠️ Invalid link.")
         return
 
     pending_sessions.set(chat_id, text)
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📽️ Movie Target", callback_data="type_movie"),
-            InlineKeyboardButton("📺 TV Series Ep", callback_data="type_tv")
+            InlineKeyboardButton("🎬 Movie", callback_data="type_movie"),
+            InlineKeyboardButton("📺 TV Show", callback_data="type_tv")
         ]
     ])
-    await update.message.reply_text("Select media type:", reply_markup=keyboard)
+    await update.message.reply_text("Select type:", reply_markup=keyboard)
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -210,10 +207,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     state, exists = pending_sessions.get(chat_id)
     if not exists:
-        await query.message.reply_text("❌ Session expired. Please send the link again.")
+        await query.message.reply_text("❌ Session expired. Send link again.")
         return
 
-    # Handle transitions and modify URL parameters if navigating episodes
+    # Dynamic URL Mutation engine inside state transition blocks
     if data == "type_movie":
         state["type"] = "movie"
     elif data == "type_tv":
@@ -225,20 +222,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif data == "tv_next":
             state["ep"] += 1
         
-        # Rewrite the URL path mapping dynamically (e.g. changing 1x3/ to 1x4/)
         current_url = state["url"]
         match = EPISODE_URL_REGEX.search(current_url.rstrip("/"))
         if match:
             season = match.group(1)
             trailing_slash = match.group(3) or "/"
             new_pattern = f"{season}x{state['ep']}{trailing_slash}"
-            state["url"] = EPISODE_URL_REGEX.sub(new_pattern, current_url.rstrip("/")) + (trailing_slash if not current_url.endswith("/") else "")
+            state["url"] = EPISODE_URL_REGEX.sub(new_pattern, current_url.rstrip("/")) + (trailing_slash if current_url.endswith("/") else "")
 
     stats_manager.track_user(chat_id, query.from_user.username or query.from_user.first_name)
     threading.Thread(target=stats_manager.save, daemon=True).start()
 
-    status_label = "Movie" if state["type"] == "movie" else f"TV Show (Episode {state['ep']})"
-    loading_msg = await query.message.reply_text(f"⏳ Extracting {status_label}...")
+    status_label = "Movie" if state["type"] == "movie" else f"EP {state['ep']}"
+    loading_msg = await query.message.reply_text(f"⏳ Fetching {status_label}...")
 
     try:
         proxy_url = os.getenv("PROXY_URL") or None
@@ -246,24 +242,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if state["type"] == "movie":
             loop_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Movie", callback_data="type_movie")]])
-            display_output = f"🎬 **MOVIE:**\n📌 URL: {state['url']}\n\n🚀 **WATCH:**\n{embed_url}"
+            display_output = f"🎬 **MOVIE:**\n🔗 {state['url']}\n\n🚀 **WATCH:**\n{embed_url}"
         else:
             loop_keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("⏮️ Previous Ep", callback_data="tv_prev"),
-                    InlineKeyboardButton("🔄 Refresh Ep", callback_data="tv_refresh"),
-                    InlineKeyboardButton("⏭️ Next Ep", callback_data="tv_next")
+                    InlineKeyboardButton("⏮️ Prev EP", callback_data="tv_prev"),
+                    InlineKeyboardButton("🔄 Refresh", callback_data="tv_refresh"),
+                    InlineKeyboardButton("⏭️ Next EP", callback_data="tv_next")
                 ]
             ])
-            display_output = f"📺 **TV SERIES:**\n📌 URL: {state['url']}\n🔢 Selection: Episode {state['ep']}\n\n🚀 **WATCH:**\n{embed_url}"
+            display_output = f"📺 **TV SHOW:**\n🔗 {state['url']}\n🔢 Episode: {state['ep']}\n\n🚀 **WATCH:**\n{embed_url}"
 
         await query.message.reply_text(display_output, reply_markup=loop_keyboard, parse_mode="Markdown")
 
     except Exception as error:
         fallback_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Retry Operation", callback_data="type_movie" if state["type"] == "movie" else "tv_refresh")]
+            [InlineKeyboardButton("🔄 Retry", callback_data="type_movie" if state["type"] == "movie" else "tv_refresh")]
         ])
-        await query.message.reply_text(f"⚠️ **Extraction Alert:** `{str(error)}`", reply_markup=fallback_keyboard, parse_mode="Markdown")
+        await query.message.reply_text(f"⚠️ **Error:** `{str(error)}`", reply_markup=fallback_keyboard, parse_mode="Markdown")
 
     try:
         await loading_msg.delete()
