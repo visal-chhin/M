@@ -3,7 +3,6 @@ import re
 import json
 import time
 import threading
-import requests
 
 from dotenv import load_dotenv
 from telegram import (
@@ -20,21 +19,23 @@ from telegram.ext import (
     filters
 )
 
+# Use curl_cffi to bypass the 403 Forbidden firewall protection
+from curl_cffi import requests
+
 # -------------------------
 # CONFIG & STATE
 # -------------------------
 load_dotenv()
 
-# Exposed Token Config
 TOKEN = "8648355227:AAHcQQySFDT3EZvWRJ4rEh7nK7rTQXOp8qk"
 AJAX_ENDPOINT = "https://khdiamond.net/wp-admin/admin-ajax.php"
 BASE_REFERER = "https://khdiamond.net"
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-    )
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive"
 }
 
 POST_ID_REGEX = re.compile(r"postid-(\d+)")
@@ -62,7 +63,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def count_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Inline generation of the stats summary report
     users = list(stats["users"].values())
     users.sort(key=lambda x: x["request_count"], reverse=True)
     top = users[:5]
@@ -93,7 +93,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Only khdiamond.net URLs are supported.")
         return
 
-    # Store initial target context; Default to Episode index 1 for potential TV loops
     session_state[chat_id] = {
         "url": text,
         "type": "movie",
@@ -139,7 +138,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["ep"] -= 1
     elif data == "tv_next":
         state["ep"] += 1
-    # Note: "refresh" or "tv_refresh" actions do not modify state variables, they re-trigger the engine.
 
     # Inline Analytics Logging Execution
     username = query.from_user.username or query.from_user.first_name
@@ -168,10 +166,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Core Streaming Scraper Logic Integration
     try:
-        # Step 1: Resource Fetch
+        # Step 1: Resource Fetch (Impersonating Chrome to bypass 403 blocks)
         headers = HEADERS.copy()
         headers["Referer"] = BASE_REFERER
-        r = requests.get(state["url"], headers=headers, timeout=30)
+        r = requests.get(state["url"], headers=headers, timeout=30, impersonate="chrome")
         r.raise_for_status()
         html = r.text
 
@@ -182,7 +180,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post_id = match.group(1)
 
         # Step 3: Asynchronous Gateway Handshake Payload
-        # For TV mode, the API parameter matches the numeric progression loop
         payload = {
             "action": "doo_player_ajax",
             "post": post_id,
@@ -193,7 +190,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ajax_headers = HEADERS.copy()
         ajax_headers["Referer"] = state["url"]
 
-        res = requests.post(AJAX_ENDPOINT, data=payload, headers=ajax_headers, timeout=30)
+        res = requests.post(AJAX_ENDPOINT, data=payload, headers=ajax_headers, timeout=30, impersonate="chrome")
         res.raise_for_status()
         data_json = res.json()
 
@@ -212,7 +209,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎥 WATCH:\n"
                 f"{embed_url}\n\n"
             )
-            # display_output = f"🎬 **Movie **\n\n text \n\nTarget URL:\n{embed_url}"
         else:
             loop_keyboard = InlineKeyboardMarkup([
                 [
@@ -231,16 +227,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(display_output, reply_markup=loop_keyboard, parse_mode="Markdown")
 
     except Exception as error:
-        # Fallback UI rendering with control panels persistent to allow retries or navigation out of dead endpoints
-        fallback_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Retry Operation", callback_data="refresh")]
-        ]) if state["type"] == "movie" else InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("⏮️ Prev EP", callback_data="tv_prev"),
-                InlineKeyboardButton("🔄 Retry EP", callback_data="tv_refresh"),
-                InlineKeyboardButton("⏭️ Next EP", callback_data="tv_next")
-            ]
-        ])
+        # Safe fallback block that relies purely on the confirmed 'state' object
+        if state.get("type") == "movie":
+            fallback_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Retry Operation", callback_data="refresh")]
+            ])
+        else:
+            fallback_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("⏮️ Prev EP", callback_data="tv_prev"),
+                    InlineKeyboardButton("🔄 Retry EP", callback_data="tv_refresh"),
+                    InlineKeyboardButton("⏭️ Next EP", callback_data="tv_next")
+                ]
+            ])
         await query.message.reply_text(f"⚠️ **Extraction Alert:** {str(error)}", reply_markup=fallback_keyboard, parse_mode="Markdown")
 
     try:
