@@ -7,6 +7,7 @@ COPY . .
 RUN pip install --no-cache-dir \
     python-telegram-bot \
     requests \
-    python-dotenv
+    python-dotenv \
+    curl_cffi
 
 CMD ["python", "movie.py"]
