@@ -32,14 +32,13 @@ DEFAULT_HEADERS = {
 }
 
 POST_ID_REGEX = re.compile(r"postid-(\d+)")
+EPISODE_URL_REGEX = re.compile(r"(\d+)x(\d+)(/?)$")
 
-# Configure structural application logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ─── Data Structures & State Management ─────────────────────────────────────
 
 class Stats:
-    """Thread-safe statistics tracking manager designed like a Go struct."""
     def __init__(self):
         self._lock = threading.Lock()
         self.total_requests = 0
@@ -97,28 +96,32 @@ class Stats:
             entries.sort(key=lambda x: x[1], reverse=True)
             top = entries[:5]
 
-            lines = [f"{i}. @{username} — {count} requests" for i, (username, count) in enumerate(top, start=1)]
+            lines = [f"{i}. @{username} — {count} reqs" for i, (username, count) in enumerate(top, start=1)]
 
             return (
-                f"📊 System Statistics:\n\n"
+                f"📊 Stats:\n"
                 f"Total Users: {len(self.users)}\n"
                 f"Total Requests: {self.total_requests}\n\n"
-                f"Top 5 Power Users:\n" + "\n".join(lines)
+                f"Top 5 Users:\n" + "\n".join(lines)
             )
 
 
 class PendingMap:
-    """Thread-safe transactional store managing user multi-step interactive workflows."""
     def __init__(self):
         self._lock = threading.Lock()
         self._data: Dict[int, dict] = {}
 
     def set(self, chat_id: int, url_str: str) -> None:
+        initial_ep = 1
+        match = EPISODE_URL_REGEX.search(url_str.rstrip("/"))
+        if match:
+            initial_ep = int(match.group(2))
+
         with self._lock:
             self._data[chat_id] = {
                 "url": url_str,
                 "type": "movie",
-                "ep": 1
+                "ep": initial_ep
             }
 
     def get(self, chat_id: int) -> Tuple[Optional[dict], bool]:
@@ -130,35 +133,41 @@ class PendingMap:
         with self._lock:
             self._data.pop(chat_id, None)
 
-# ─── Network Scraper Decoupled Engine ────────────────────────────────────────
+# ─── Network Scraper Engine ──────────────────────────────────────────────────
 
 def fetch_html(page_url: str, referer: str, proxy_url: Optional[str] = None) -> str:
     headers = DEFAULT_HEADERS.copy()
     headers["Referer"] = referer
     
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-    
-    response = requests.get(
-        page_url, 
-        headers=headers, 
-        timeout=30, 
-        impersonate="chrome", 
-        proxies=proxies
-    )
-    response.raise_for_status()
-    return response.text
+
+    try:
+        response = requests.get(
+            page_url, 
+            headers=headers, 
+            timeout=30, 
+            impersonate="chrome", 
+            proxies=proxies
+        )
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestsError as ce:
+        if "Unsupported proxy syntax" in str(ce) and proxies:
+            logging.warning("Proxy syntax error caught. Dropping proxy configuration parameters and trying raw fallback connection...")
+            response = requests.get(page_url, headers=headers, timeout=30, impersonate="chrome")
+            response.raise_for_status()
+            return response.text
+        raise ce
 
 
 def get_khdiamond_stream(page_url: str, media_type: str, episode: int = 1, proxy_url: Optional[str] = None) -> str:
-    # Step 1: Request root DOM layout markup parsing target
     html = fetch_html(page_url, BASE_REFERER, proxy_url)
 
     match = POST_ID_REGEX.search(html)
     if not match:
-        raise Exception("Failed to locate required internal Post ID within server response.")
+        raise Exception("Failed to locate internal Post ID within server response.")
     post_id = match.group(1)
 
-    # Step 2: Formulate payload request parameters mapping
     payload = {
         "action": "doo_player_ajax",
         "post": post_id,
@@ -172,22 +181,28 @@ def get_khdiamond_stream(page_url: str, media_type: str, episode: int = 1, proxy
 
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
-    # Step 3: Perform back-end secure AJAX handshake query execution
-    response = requests.post(
-        AJAX_ENDPOINT, 
-        data=payload, 
-        headers=ajax_headers, 
-        timeout=30, 
-        impersonate="chrome", 
-        proxies=proxies
-    )
-    response.raise_for_status()
-    
+    try:
+        response = requests.post(
+            AJAX_ENDPOINT, 
+            data=payload, 
+            headers=ajax_headers, 
+            timeout=30, 
+            impersonate="chrome", 
+            proxies=proxies
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestsError as ce:
+        if "Unsupported proxy syntax" in str(ce) and proxies:
+            response = requests.post(AJAX_ENDPOINT, data=payload, headers=ajax_headers, timeout=30, impersonate="chrome")
+            response.raise_for_status()
+        else:
+            raise ce
+
     result = response.json()
     embed_url = result.get("embed_url")
     if not embed_url:
-        raise Exception("Server returned empty embed stream URL string configuration map.")
-        
+        raise Exception("Server returned empty embed stream URL layout configuration.")
+
     return embed_url
 
 # ─── Bot Presentation Interface Handlers ─────────────────────────────────────
@@ -197,12 +212,11 @@ def get_username(user) -> str:
         return "unknown"
     return user.username if user.username else user.first_name
 
-# Global runtime state allocation instances
 stats_manager = Stats.load()
 pending_sessions = PendingMap()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("👋 Welcome! Drop me any valid khdiamond.net link to capture streaming targets.")
+    await update.message.reply_text("👋 Send a valid khdiamond.net link.")
 
 async def count_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(stats_manager.report())
@@ -217,23 +231,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text.startswith("/"):
         return
 
-    if not text.startswith("http"):
-        await update.message.reply_text("⚠️ Validation error: Please enter a fully qualified HTTP link layout layout structure.")
-        return
-
-    if "khdiamond.net" not in text:
-        await update.message.reply_text("⚠️ Domain restriction: Only destination links originating from khdiamond.net are supported.")
+    if not text.startswith("http") or "khdiamond.net" not in text:
+        await update.message.reply_text("⚠️ Invalid domain layout pattern.")
         return
 
     pending_sessions.set(chat_id, text)
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📽️ Movie ", callback_data="type_movie"),
-            InlineKeyboardButton("📺 Ep", callback_data="type_tv")
+            InlineKeyboardButton("🎬 Movie", callback_data="type_movie"),
+            InlineKeyboardButton("📺 TV Series", callback_data="type_tv")
         ]
     ])
-    await update.message.reply_text("Please select target indexing media type option:", reply_markup=keyboard)
+    await update.message.reply_text("Select Media Type:", reply_markup=keyboard)
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -245,58 +255,64 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     state, exists = pending_sessions.get(chat_id)
     if not exists:
-        await query.message.reply_text("❌ Interactive transaction session expired. Please resend destination link payload.")
+        await query.message.reply_text("❌ Session expired. Please send the link again.")
         return
 
-    # Handle transitions / state machine data mutations safely
     if data == "type_movie":
         state["type"] = "movie"
     elif data == "type_tv":
         state["type"] = "tv"
-    elif data == "tv_prev":
-        if state["ep"] > 1:
+    elif data in ("tv_prev", "tv_next", "tv_refresh"):
+        if data == "tv_prev" and state["ep"] > 1:
             state["ep"] -= 1
-    elif data == "tv_next":
-        state["ep"] += 1
+        elif data == "tv_next":
+            state["ep"] += 1
 
-    # Record operations analytics transaction records metrics log update
+        current_url = state["url"]
+        match = EPISODE_URL_REGEX.search(current_url.rstrip("/"))
+        if match:
+            season = match.group(1)
+            trailing_slash = match.group(3) or "/"
+            new_pattern = f"{season}x{state['ep']}{trailing_slash}"
+            state["url"] = EPISODE_URL_REGEX.sub(new_pattern, current_url.rstrip("/")) + (trailing_slash if current_url.endswith("/") else "")
+
     stats_manager.track_user(chat_id, username)
     threading.Thread(target=stats_manager.save, daemon=True).start()
 
-    status_label = "Movie" if state["type"] == "movie" else f"TV Show (Episode {state['ep']})"
-    loading_msg = await query.message.reply_text(f"⏳ Performing handshake processing for {status_label}...")
+    status_label = "Movie" if state["type"] == "movie" else f"EP {state['ep']}"
+    loading_msg = await query.message.reply_text(f"⏳ Loading {status_label}...")
 
     try:
-        # Retrieve optional proxy environment variables setup parameter configurations routing engine 
-        proxy_url = os.getenv("PROXY_URL")
-        if not proxy_url:
-            proxy_url = None
-
+        proxy_url = os.getenv("PROXY_URL") or None
         embed_url = get_khdiamond_stream(state["url"], state["type"], state["ep"], proxy_url=proxy_url)
 
         if state["type"] == "movie":
             loop_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh Session Link", callback_data="type_movie")]
+                [InlineKeyboardButton("🔄 Refresh Movie", callback_data="type_movie")]
             ])
-            display_output = f"🎬 **MOVIE INDEX COMPILED:**\n📌 URL: {state['url']}\n\n🚀 **WATCH LIVE STREAM:**\n{embed_url}"
+            display_output = f"🎬 **MOVIE:**\n🔗 {state['url']}\n\n🚀 **WATCH:**\n{embed_url}"
         else:
             loop_keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("⏮️ Previous Ep", callback_data="tv_prev"),
-                    InlineKeyboardButton("🔄 Refresh Ep", callback_data="tv_refresh"),
-                    InlineKeyboardButton("⏭️ Next Ep", callback_data="tv_next")
+                    InlineKeyboardButton("⏮️ Prev EP", callback_data="tv_prev"),
+                    InlineKeyboardButton("🔄 Refresh", callback_data="tv_refresh"),
+                    InlineKeyboardButton("⏭️ Next EP", callback_data="tv_next")
                 ]
             ])
-            display_output = f"📺 **TV EPISODE GRAPH INTERACTIVE:**\n📌 URL: {state['url']}\n🔢 Current Selection: Episode {state['ep']}\n\n🚀 **WATCH LIVE STREAM:**\n{embed_url}"
+            display_output = f"📺 **TV SERIES:**\n🔗 {state['url']}\n🔢 Episode: {state['ep']}\n\n🚀 **WATCH:**\n{embed_url}"
 
         await query.message.reply_text(display_output, reply_markup=loop_keyboard, parse_mode="Markdown")
 
     except Exception as error:
-        logging.error(f"Extraction execution pipeline fault recorded: {error}")
+        logging.error(f"Pipeline fault: {error}")
+        err_msg = str(error)
+        if "Unsupported proxy syntax" in err_msg:
+            err_msg = "Proxy syntax configuration error on host variable. Please fix formatting."
+            
         fallback_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Retry Transaction Execution", callback_data="type_movie" if state["type"] == "movie" else "tv_refresh")]
+            [InlineKeyboardButton("🔄 Retry", callback_data="type_movie" if state["type"] == "movie" else "tv_refresh")]
         ])
-        await query.message.reply_text(f"⚠️ **Extraction Alert:** `{str(error)}`", reply_markup=fallback_keyboard, parse_mode="Markdown")
+        await query.message.reply_text(f"⚠️ **Error:** `{err_msg}`", reply_markup=fallback_keyboard, parse_mode="Markdown")
 
     try:
         await loading_msg.delete()
@@ -319,7 +335,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logging.info("Network listener active. Listening for upstream data transactions...")
+    logging.info("Network listener active...")
     app.run_polling()
 
 if __name__ == "__main__":
