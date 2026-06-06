@@ -230,7 +230,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📽️ Movie ", callback_data="type_movie"),
-            InlineKeyboardButton("📺 EpSOIDE", callback_data="type_tv")
+            InlineKeyboardButton("📺 Ep", callback_data="type_tv")
         ]
     ])
     await update.message.reply_text("Please select target indexing media type option:", reply_markup=keyboard)
