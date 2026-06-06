@@ -1,5 +1,0 @@
-services:
-  movie-bot:
-    build: .
-    environment:
-      TOKEN: 8648355227:AAHcQQySFDT3EZvWRJ4rEh7nK7rTQXOp8qk
