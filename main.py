@@ -320,15 +320,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         pass
 
 # ─── Application Main Initialization Entrypoint ─────────────────────────────
-
 def main() -> None:
     load_dotenv()
 
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        token = "8648355227:AAHcQQySFDT3EZvWRJ4rEh7nK7rTQXOp8qk"
+    TOKEN = "8648355227:AAHygQo9ud4VPnzSIj8uafzHIRYQIZSVSI8"
 
-    app = Application.builder().token(token).build()
+    if not TOKEN:
+
+        TOKEN = "8648355227:AAHygQo9ud4VPnzSIj8uafzHIRYQIZSVSI8"
+
+
+    app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("count_process", count_process))
@@ -337,6 +339,7 @@ def main() -> None:
 
     logging.info("Network listener active...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
